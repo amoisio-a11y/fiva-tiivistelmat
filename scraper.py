@@ -37,7 +37,7 @@ import time
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from email.message import EmailMessage
-from email.utils import formatdate, make_msgid
+from email.utils import formatdate
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 from urllib.request import Request, urlopen
@@ -287,15 +287,33 @@ class Mailer:
             raise SystemExit(1)
 
     def send(self, msg: EmailMessage) -> None:
-        msg["From"] = f"Fiva-tiivistelmät <{self.user}>"
+        # Rakennettu samalla tavalla kuin Lounas-repossa (toimii Gmailin kanssa):
+        # ASCII-lähettäjänimi, ei omaa Message-ID:tä, sendmail + as_string().
+        msg["From"] = f"Fiva-tiivistelmat <{self.user}>"
         msg["To"] = ", ".join(self.to)
         msg["Date"] = formatdate(localtime=True)
-        msg["Message-ID"] = make_msgid(domain="fiva-tiivistelmat.local")
-        smtp_cls = smtplib.SMTP_SSL if self.ssl else smtplib.SMTP
-        with smtp_cls(self.host, self.port, timeout=30) as s:
-            if self.password and self.ssl:
-                s.login(self.user, self.password)
-            s.send_message(msg)
+        raw = msg.as_string()
+
+        last: Exception | None = None
+        for attempt in range(1, 4):
+            stage = "yhdistäminen"
+            try:
+                smtp_cls = smtplib.SMTP_SSL if self.ssl else smtplib.SMTP
+                with smtp_cls(self.host, self.port) as s:
+                    if self.password and self.ssl:
+                        stage = "kirjautuminen"
+                        s.login(self.user, self.password)
+                    stage = "lähetys"
+                    s.sendmail(self.user, self.to, raw)
+                return
+            except smtplib.SMTPAuthenticationError:
+                raise  # väärä salasana ei korjaudu uudelleenyrityksellä
+            except Exception as e:  # noqa: BLE001
+                last = e
+                print(f"  yritys {attempt}/3 epäonnistui vaiheessa '{stage}': {type(e).__name__}: {e}")
+                if attempt < 3:
+                    time.sleep(15 * attempt)
+        raise RuntimeError(f"vaihe '{stage}': {type(last).__name__}: {last}")
 
 
 # --------------------------------------------------------------------------- #
