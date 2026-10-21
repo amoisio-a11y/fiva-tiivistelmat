@@ -61,6 +61,19 @@ TITLE_SUFFIX_RE = re.compile(r"\s*-\s*Tarkastusten tiivistelmät\s*-\s*www\.fina
 DATE_RE = re.compile(r"(?:Julkaistu|Päivitetty)\s*:?\s*(\d{1,2}\.\d{1,2}\.\d{4})", re.I)
 
 
+def gh_error(msg: str) -> None:
+    """Tulostaa virheen ja GitHub Actions -huomautuksen (näkyy ajon yhteenvedossa)."""
+    print(f"VIRHE: {msg}")
+    if os.environ.get("GITHUB_ACTIONS"):
+        print(f"::error::{msg.replace(chr(10), ' ')}")
+
+
+def gh_warning(msg: str) -> None:
+    print(f"varoitus: {msg}")
+    if os.environ.get("GITHUB_ACTIONS"):
+        print(f"::warning::{msg.replace(chr(10), ' ')}")
+
+
 # --------------------------------------------------------------------------- #
 # Verkko
 # --------------------------------------------------------------------------- #
@@ -270,7 +283,8 @@ class Mailer:
     def check(self) -> None:
         missing = [n for n, v in (("GMAIL_APP_PASSWORD", self.password), ("RECIPIENTS", self.to)) if not v]
         if missing:
-            raise SystemExit(f"Puuttuvat ympäristömuuttujat: {', '.join(missing)}")
+            gh_error(f"Puuttuvat salaisuudet (GitHub Secrets): {', '.join(missing)}")
+            raise SystemExit(1)
 
     def send(self, msg: EmailMessage) -> None:
         msg["From"] = f"Fiva-tiivistelmät <{self.user}>"
@@ -316,7 +330,7 @@ def main() -> int:
     print(f"Sitemapissa {len(entries)} tiivistelmää.")
     if not entries:
         # Älä koskaan tyhjennä tilaa: todennäköisesti sivuston rakenne on muuttunut.
-        print("VIRHE: yhtään tiivistelmää ei löytynyt – onko sitemapin tai URL-polun rakenne muuttunut?")
+        gh_error("Yhtään tiivistelmää ei löytynyt sitemapista – onko sitemapin tai URL-polun rakenne muuttunut?")
         return 1
 
     state = load_state()
@@ -338,7 +352,7 @@ def main() -> int:
         try:
             details = page_details(url)
         except Exception as e:  # noqa: BLE001 – sivun haku ei saa estää ilmoitusta
-            print(f"  varoitus: sivun tietoja ei saatu ({e}); käytetään URLia.")
+            gh_warning(f"Sivun tietoja ei saatu ({e}); käytetään URLia.")
             details = {"title": title_from_slug(url), "lead": "", "date": ""}
         items.append({"key": k, "url": url, "lastmod": entries[k]["lastmod"], **details})
         print(f"  + {details['title']}")
@@ -364,7 +378,10 @@ def main() -> int:
             mailer.send(build_single(it))
         except Exception as e:  # noqa: BLE001
             failed += 1
-            print(f"  VIRHE lähetyksessä: {it['title']}: {e}")
+            hint = ""
+            if isinstance(e, smtplib.SMTPAuthenticationError):
+                hint = " – Gmail hylkäsi kirjautumisen: tarkista GMAIL_APP_PASSWORD (16 merkin sovellussalasana)."
+            gh_error(f"Lähetys epäonnistui ({it['title']}): {type(e).__name__}: {e}{hint}")
             continue
         seen[it["key"]] = it["lastmod"]
         save_state(state)  # tallenna heti, ettei osittainen virhe aiheuta tuplaviestejä
@@ -374,4 +391,10 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except SystemExit:
+        raise
+    except Exception as e:  # noqa: BLE001
+        gh_error(f"{type(e).__name__}: {e}")
+        raise
